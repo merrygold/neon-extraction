@@ -7,3 +7,6 @@ neon-extraction/bundle-temp/
 neon-extraction/bundle.html
 neon-extraction/.parcel-cache/
 *.zip
+.vercel
+download-ffmpeg.cjs
+*-player-script.js
