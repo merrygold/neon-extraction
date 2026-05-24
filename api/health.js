@@ -1,4 +1,4 @@
-export default function handler(req, res) {
+module.exports = function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.status(200).json({
     status: 'online',
@@ -6,4 +6,4 @@ export default function handler(req, res) {
     platforms: ['youtube'],
     version: '2.0.0',
   });
-}
+};
