@@ -12,64 +12,31 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-const INSTANCES = ['https://inv.thepixora.com'];
+const PRIMARY = 'https://inv.thepixora.com';
 const PROXY_URL = 'https://api.codetabs.com/v1/proxy?quest=';
 
-let cachedInstances = INSTANCES;
-let lastRefresh = 0;
-
-async function getInstances() {
-  const now = Date.now();
-  if (now - lastRefresh < 600000) return cachedInstances;
-  lastRefresh = now;
-  try {
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 4000);
-    const r = await fetch('https://api.invidious.io/instances.json', { signal: controller.signal });
-    if (r.ok) {
-      const data = await r.json();
-      const list = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
-      if (list.length > 0) { cachedInstances = [...new Set([...list, ...INSTANCES])]; return cachedInstances; }
-    }
-  } catch (e) { console.error('[NEON] Instance refresh failed:', e.message); }
-  return cachedInstances;
+function makeAbort(ms) {
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
 }
 
-async function fetchFromInstance(base, videoId) {
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), 15000);
-  const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-    signal: controller.signal,
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return await r.json();
-}
-
-async function fetchViaProxy(videoId) {
-  const targetUrl = encodeURIComponent(`${INSTANCES[0]}/api/v1/videos/${videoId}`);
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), 15000);
-  const r = await fetch(PROXY_URL + targetUrl, { signal: controller.signal });
-  if (!r.ok) throw new Error(`Proxy HTTP ${r.status}`);
+async function tryFetch(url, timeout) {
+  const r = await fetch(url, { signal: makeAbort(timeout), headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
   return await r.json();
 }
 
 async function fetchVideoInfo(videoId) {
-  // Try direct first
-  const instances = await getInstances();
-  for (const base of instances) {
-    try {
-      const data = await fetchFromInstance(base, videoId);
-      if (data.title) return data;
-    } catch (e) { console.error(`[NEON] ${base} failed:`, e.message); }
-  }
+  const directUrl = `${PRIMARY}/api/v1/videos/${videoId}`;
+  const proxyUrl = PROXY_URL + encodeURIComponent(directUrl);
 
-  // Fallback: try via CORS proxy
-  try {
-    const data = await fetchViaProxy(videoId);
-    if (data.title) return data;
-  } catch (e) { console.error('[NEON] Proxy failed:', e.message); }
+  const directPromise = tryFetch(directUrl, 5000).catch(e => { console.error('[NEON] Direct:', e.message); return null; });
+  const proxyPromise = tryFetch(proxyUrl, 8000).catch(e => { console.error('[NEON] Proxy:', e.message); return null; });
+
+  const [direct, proxy] = await Promise.all([directPromise, proxyPromise]);
+  const result = direct?.title ? direct : proxy?.title ? proxy : null;
+  if (result) return result;
 
   throw new Error('Could not fetch video info. The service may be temporarily overloaded. Please try again in a moment.');
 }
