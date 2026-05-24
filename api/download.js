@@ -12,21 +12,22 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-const STATIC_INSTANCES = ['https://inv.thepixora.com'];
-
-let cachedInstances = STATIC_INSTANCES;
-let lastInstanceRefresh = 0;
+const INSTANCES = ['https://inv.thepixora.com'];
+let cachedInstances = INSTANCES;
+let lastRefresh = 0;
 
 async function getInstances() {
   const now = Date.now();
-  if (now - lastInstanceRefresh < 600000) return cachedInstances;
-  lastInstanceRefresh = now;
+  if (now - lastRefresh < 600000) return cachedInstances;
+  lastRefresh = now;
   try {
-    const r = await fetch('https://api.invidious.io/instances.json', { signal: AbortSignal.timeout(4000) });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 4000);
+    const r = await fetch('https://api.invidious.io/instances.json', { signal: controller.signal });
     if (r.ok) {
       const data = await r.json();
-      const apiInstances = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
-      if (apiInstances.length > 0) { cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])]; return cachedInstances; }
+      const list = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
+      if (list.length > 0) { cachedInstances = [...new Set([...list, ...INSTANCES])]; return cachedInstances; }
     }
   } catch {}
   return cachedInstances;
@@ -36,8 +37,10 @@ async function fetchVideoInfo(videoId) {
   const instances = await getInstances();
   for (const base of instances) {
     try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 15000);
       const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        signal: AbortSignal.timeout(15000),
+        signal: controller.signal,
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       });
       if (r.ok) { const data = await r.json(); if (data.title) return data; }
@@ -57,7 +60,6 @@ async function handleYouTubeDownload(url, quality, res) {
   const muxed = data.formatStreams || [];
   const adaptive = data.adaptiveFormats || [];
 
-  // Best muxed format at or below requested quality
   const muxedMatch = muxed
     .filter(f => f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight)
     .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0))[0];
@@ -69,7 +71,6 @@ async function handleYouTubeDownload(url, quality, res) {
     return res.redirect(302, muxedMatch.url);
   }
 
-  // Best video-only adaptive format
   const videoFormats = adaptive
     .filter(f => f.type?.startsWith('video/') && f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight)
     .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0));
@@ -82,12 +83,8 @@ async function handleYouTubeDownload(url, quality, res) {
     return res.redirect(302, bestVideo.url);
   }
 
-  throw new Error('No downloadable format found for this quality');
+  throw new Error('No downloadable format found');
 }
-
-export const config = {
-  api: { bodyParser: { sizeLimit: '1mb' }, responseLimit: false, maxDuration: 30 },
-};
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -98,22 +95,17 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { url, quality } = req.body;
+    const { url, quality } = req.body || {};
     if (!url) return res.status(400).json({ error: 'URL is required' });
 
     const platform = detectPlatform(url);
-
     if (platform === 'youtube') {
       await handleYouTubeDownload(url, quality, res);
     } else {
-      res.status(400).json({
-        error: `${platform} downloads require the local server. Vercel supports YouTube only.`,
-      });
+      res.status(400).json({ error: `${platform} not supported on Vercel. Use local server.` });
     }
   } catch (err) {
-    console.error('[NEON API] Download error:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Download failed' });
-    }
+    console.error('[NEON] Download error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Download failed' });
   }
 }
