@@ -1,5 +1,14 @@
 import ytdl from '@distube/ytdl-core';
 
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '1mb',
+    },
+    responseLimit: false,
+  },
+};
+
 function detectPlatform(url) {
   if (/youtube\.com|youtu\.be/i.test(url)) return 'youtube';
   if (/instagram\.com/i.test(url)) return 'instagram';
