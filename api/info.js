@@ -16,27 +16,31 @@ const STATIC_INSTANCES = [
   'https://inv.thepixora.com',
 ];
 
-let cachedInstances = null;
+let cachedInstances = STATIC_INSTANCES;
 let lastInstanceRefresh = 0;
 
 async function getInstances() {
   const now = Date.now();
-  if (cachedInstances && now - lastInstanceRefresh < 300000) return cachedInstances;
+  if (now - lastInstanceRefresh < 600000) return cachedInstances;
 
+  lastInstanceRefresh = now;
   try {
     const r = await fetch('https://api.invidious.io/instances.json', {
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(4000),
     });
     if (r.ok) {
       const data = await r.json();
       const apiInstances = data
-        .filter(i => i[1]?.api && !i[1]?.flagged && i[1]?.monitor?.enabled !== false)
+        .filter(i => i[1]?.api && !i[1]?.flagged)
         .map(i => 'https://' + i[0]);
       if (apiInstances.length > 0) {
         cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])];
-        lastInstanceRefresh = now;
         return cachedInstances;
       }
+    }
+  } catch {}
+  return cachedInstances;
+}
     }
   } catch {}
   cachedInstances = STATIC_INSTANCES;

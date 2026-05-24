@@ -14,26 +14,21 @@ function extractVideoId(url) {
 
 const STATIC_INSTANCES = ['https://inv.thepixora.com'];
 
-let cachedInstances = null;
+let cachedInstances = STATIC_INSTANCES;
 let lastInstanceRefresh = 0;
 
 async function getInstances() {
   const now = Date.now();
-  if (cachedInstances && now - lastInstanceRefresh < 300000) return cachedInstances;
+  if (now - lastInstanceRefresh < 600000) return cachedInstances;
+  lastInstanceRefresh = now;
   try {
-    const r = await fetch('https://api.invidious.io/instances.json', { signal: AbortSignal.timeout(6000) });
+    const r = await fetch('https://api.invidious.io/instances.json', { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const data = await r.json();
       const apiInstances = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
-      if (apiInstances.length > 0) {
-        cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])];
-        lastInstanceRefresh = now;
-        return cachedInstances;
-      }
+      if (apiInstances.length > 0) { cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])]; return cachedInstances; }
     }
   } catch {}
-  cachedInstances = STATIC_INSTANCES;
-  lastInstanceRefresh = now;
   return cachedInstances;
 }
 
@@ -42,7 +37,7 @@ async function fetchVideoInfo(videoId) {
   for (const base of instances) {
     try {
       const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(15000),
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       });
       if (r.ok) { const data = await r.json(); if (data.title) return data; }
