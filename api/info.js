@@ -13,6 +13,7 @@ function extractVideoId(url) {
 }
 
 const INSTANCES = ['https://inv.thepixora.com'];
+const PROXY_URL = 'https://api.codetabs.com/v1/proxy?quest=';
 
 let cachedInstances = INSTANCES;
 let lastRefresh = 0;
@@ -45,7 +46,17 @@ async function fetchFromInstance(base, videoId) {
   return await r.json();
 }
 
+async function fetchViaProxy(videoId) {
+  const targetUrl = encodeURIComponent(`${INSTANCES[0]}/api/v1/videos/${videoId}`);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 15000);
+  const r = await fetch(PROXY_URL + targetUrl, { signal: controller.signal });
+  if (!r.ok) throw new Error(`Proxy HTTP ${r.status}`);
+  return await r.json();
+}
+
 async function fetchVideoInfo(videoId) {
+  // Try direct first
   const instances = await getInstances();
   for (const base of instances) {
     try {
@@ -53,7 +64,14 @@ async function fetchVideoInfo(videoId) {
       if (data.title) return data;
     } catch (e) { console.error(`[NEON] ${base} failed:`, e.message); }
   }
-  throw new Error('Could not fetch video info. Please try again later.');
+
+  // Fallback: try via CORS proxy
+  try {
+    const data = await fetchViaProxy(videoId);
+    if (data.title) return data;
+  } catch (e) { console.error('[NEON] Proxy failed:', e.message); }
+
+  throw new Error('Could not fetch video info. The service may be temporarily overloaded. Please try again in a moment.');
 }
 
 function parseFormats(data) {

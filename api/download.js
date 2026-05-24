@@ -13,6 +13,7 @@ function extractVideoId(url) {
 }
 
 const INSTANCES = ['https://inv.thepixora.com'];
+const PROXY_URL = 'https://api.codetabs.com/v1/proxy?quest=';
 let cachedInstances = INSTANCES;
 let lastRefresh = 0;
 
@@ -33,19 +34,34 @@ async function getInstances() {
   return cachedInstances;
 }
 
+async function fetchFromInstance(base, videoId) {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 15000);
+  const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
+    signal: controller.signal,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+  });
+  if (r.ok) { const data = await r.json(); if (data.title) return data; }
+  throw new Error('Failed from ' + base);
+}
+
+async function fetchViaProxy(videoId) {
+  const targetUrl = encodeURIComponent(`${INSTANCES[0]}/api/v1/videos/${videoId}`);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 15000);
+  const r = await fetch(PROXY_URL + targetUrl, { signal: controller.signal });
+  if (!r.ok) throw new Error('Proxy HTTP ' + r.status);
+  const data = await r.json();
+  if (data.title) return data;
+  throw new Error('No title in proxy response');
+}
+
 async function fetchVideoInfo(videoId) {
   const instances = await getInstances();
   for (const base of instances) {
-    try {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(), 15000);
-      const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      });
-      if (r.ok) { const data = await r.json(); if (data.title) return data; }
-    } catch {}
+    try { return await fetchFromInstance(base, videoId); } catch {}
   }
+  try { return await fetchViaProxy(videoId); } catch {}
   throw new Error('Could not fetch video info. Please try again.');
 }
 
