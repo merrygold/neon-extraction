@@ -1,0 +1,9 @@
+node_modules/
+bin/
+downloads/
+neon-extraction/node_modules/
+neon-extraction/dist/
+neon-extraction/bundle-temp/
+neon-extraction/bundle.html
+neon-extraction/.parcel-cache/
+*.zip
