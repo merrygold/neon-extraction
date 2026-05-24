@@ -8,101 +8,122 @@ function detectPlatform(url) {
 }
 
 function extractVideoId(url) {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-  ];
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
+  const m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
-const INVIDIOUS_BASES = [
+const STATIC_INSTANCES = [
   'https://inv.thepixora.com',
 ];
 
-async function fetchInvidious(videoId, retries = INVIDIOUS_BASES.length) {
-  for (let i = 0; i < retries; i++) {
-    const base = INVIDIOUS_BASES[i % INVIDIOUS_BASES.length];
+let cachedInstances = null;
+let lastInstanceRefresh = 0;
+
+async function getInstances() {
+  const now = Date.now();
+  if (cachedInstances && now - lastInstanceRefresh < 300000) return cachedInstances;
+
+  try {
+    const r = await fetch('https://api.invidious.io/instances.json', {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const apiInstances = data
+        .filter(i => i[1]?.api && !i[1]?.flagged && i[1]?.monitor?.enabled !== false)
+        .map(i => 'https://' + i[0]);
+      if (apiInstances.length > 0) {
+        cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])];
+        lastInstanceRefresh = now;
+        return cachedInstances;
+      }
+    }
+  } catch {}
+  cachedInstances = STATIC_INSTANCES;
+  lastInstanceRefresh = now;
+  return cachedInstances;
+}
+
+async function fetchFromInstance(base, videoId) {
+  const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json',
+    },
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+
+async function fetchVideoInfo(videoId) {
+  const instances = await getInstances();
+
+  // Try each instance sequentially with a reasonable timeout
+  for (const base of instances) {
     try {
+      const data = await fetchFromInstance(base, videoId);
+      if (data.title) return data;
+    } catch {}
+  }
+
+  // Last resort: try with longer timeout on static instances
+  for (const base of STATIC_INSTANCES) {
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 25000);
       const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        signal: AbortSignal.timeout(10000),
-        headers: { 'User-Agent': 'NeonExtraction/1.0' },
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json',
+        },
       });
       if (r.ok) {
         const data = await r.json();
-        data._instance = base;
-        return data;
+        if (data.title) return data;
       }
     } catch {}
   }
-  throw new Error('All Invidious instances failed. Please try again later.');
-}
 
-async function refreshInstances() {
-  try {
-    const r = await fetch('https://api.invidious.io/instances.json', {
-      signal: AbortSignal.timeout(8000),
-    });
-    const data = await r.json();
-    const apiInstances = data
-      .filter(i => i[1]?.api && !i[1]?.flagged)
-      .map(i => 'https://' + i[0]);
-    if (apiInstances.length > 0) {
-      INVIDIOUS_BASES.length = 0;
-      INVIDIOUS_BASES.push(...apiInstances);
-    }
-  } catch {}
-}
-
-let lastRefresh = 0;
-
-async function getInvidiousWithRefresh(videoId) {
-  const now = Date.now();
-  if (now - lastRefresh > 3600000) {
-    lastRefresh = now;
-    await refreshInstances();
-  }
-  return fetchInvidious(videoId);
+  throw new Error('Could not fetch video info. The Invidious network may be temporarily overloaded. Please try again in a moment.');
 }
 
 function parseInvidiousFormats(data) {
   const seen = new Set();
   const qualities = [];
-
   const muxed = data.formatStreams || [];
   const adaptive = data.adaptiveFormats || [];
-
   const videoAdaptive = adaptive.filter(f => f.type?.startsWith('video/') && f.qualityLabel);
 
-  for (const f of [...muxed, ...videoAdaptive].sort((a, b) => {
-    const hA = parseInt(a.qualityLabel) || 0;
-    const hB = parseInt(b.qualityLabel) || 0;
-    return hB - hA;
-  })) {
+  const all = [...muxed, ...videoAdaptive].sort((a, b) => {
+    return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0);
+  });
+
+  for (const f of all) {
     const label = f.qualityLabel || '360p';
     if (!seen.has(label)) {
       seen.add(label);
+      const isMuxed = muxed.some(m => m.qualityLabel === label && m.itag === f.itag);
       qualities.push({
         label,
         height: parseInt(label) || 0,
         format_id: f.itag?.toString() || f.index?.toString() || '',
         ext: f.container || 'mp4',
-        filesize: f.clen ? parseInt(f.clen) : (f.size ? null : null),
+        filesize: f.clen ? parseInt(f.clen) : null,
         vcodec: f.encoding || '',
         acodec: '',
         vbr: f.bitrate ? Math.round(parseInt(f.bitrate) / 1000) : null,
         abr: null,
         tbr: null,
-        hasAudio: f.type?.includes('audio') || !!muxed.find(m => m.qualityLabel === label),
-        isMuxed: !!muxed.find(m => m.qualityLabel === label && m.itag === f.itag),
+        hasAudio: isMuxed,
+        isMuxed,
       });
     }
   }
 
   if (qualities.length === 0) {
-    qualities.push({ label: '360p', height: 360, format_id: '', ext: 'mp4', filesize: null, vcodec: '', acodec: '', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true });
+    qualities.push({ label: '360p', height: 360, format_id: '18', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true });
   }
 
   return qualities;
@@ -110,16 +131,17 @@ function parseInvidiousFormats(data) {
 
 async function getYouTubeInfo(url) {
   const videoId = extractVideoId(url);
-  if (!videoId) throw new Error('Could not extract YouTube video ID');
+  if (!videoId) throw new Error('Could not extract YouTube video ID. Make sure the URL is a valid YouTube link.');
 
-  const data = await getInvidiousWithRefresh(videoId);
-  const base = data._instance;
+  const data = await fetchVideoInfo(videoId);
+  const thumb = data.videoThumbnails?.find(t => t.quality === 'maxres') || data.videoThumbnails?.[0];
+  const thumbUrl = thumb?.url
+    ? (thumb.url.startsWith('http') ? thumb.url : `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`)
+    : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
   return {
     title: data.title || 'Untitled',
-    thumbnail: data.videoThumbnails?.[0]?.url
-      ? (data.videoThumbnails[0].url.startsWith('http') ? data.videoThumbnails[0].url : base + data.videoThumbnails[0].url)
-      : null,
+    thumbnail: thumbUrl,
     duration: data.lengthSeconds || 0,
     description: (data.description || '').slice(0, 300),
     platform: 'youtube',
@@ -147,7 +169,10 @@ async function getGenericInfo(url, platform) {
 }
 
 export const config = {
-  api: { bodyParser: { sizeLimit: '1mb' } },
+  api: {
+    bodyParser: { sizeLimit: '1mb' },
+    maxDuration: 30,
+  },
 };
 
 export default async function handler(req, res) {
@@ -163,13 +188,9 @@ export default async function handler(req, res) {
     if (!url) return res.status(400).json({ error: 'URL is required' });
 
     const platform = detectPlatform(url);
-    let info;
-
-    if (platform === 'youtube') {
-      info = await getYouTubeInfo(url);
-    } else {
-      info = await getGenericInfo(url, platform);
-    }
+    const info = platform === 'youtube'
+      ? await getYouTubeInfo(url)
+      : await getGenericInfo(url, platform);
 
     res.status(200).json(info);
   } catch (err) {

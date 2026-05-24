@@ -8,58 +8,61 @@ function detectPlatform(url) {
 }
 
 function extractVideoId(url) {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-  ];
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
+  const m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
-const INVIDIOUS_BASES = ['https://inv.thepixora.com'];
+const STATIC_INSTANCES = ['https://inv.thepixora.com'];
 
-let lastRefresh = 0;
+let cachedInstances = null;
+let lastInstanceRefresh = 0;
 
-async function refreshInstances() {
-  try {
-    const r = await fetch('https://api.invidious.io/instances.json', { signal: AbortSignal.timeout(8000) });
-    const data = await r.json();
-    const apiInstances = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
-    if (apiInstances.length > 0) { INVIDIOUS_BASES.length = 0; INVIDIOUS_BASES.push(...apiInstances); }
-  } catch {}
-}
-
-async function fetchInvidious(videoId) {
+async function getInstances() {
   const now = Date.now();
-  if (now - lastRefresh > 3600000) { lastRefresh = now; await refreshInstances(); }
+  if (cachedInstances && now - lastInstanceRefresh < 300000) return cachedInstances;
+  try {
+    const r = await fetch('https://api.invidious.io/instances.json', { signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const data = await r.json();
+      const apiInstances = data.filter(i => i[1]?.api && !i[1]?.flagged).map(i => 'https://' + i[0]);
+      if (apiInstances.length > 0) {
+        cachedInstances = [...new Set([...apiInstances, ...STATIC_INSTANCES])];
+        lastInstanceRefresh = now;
+        return cachedInstances;
+      }
+    }
+  } catch {}
+  cachedInstances = STATIC_INSTANCES;
+  lastInstanceRefresh = now;
+  return cachedInstances;
+}
 
-  for (const base of INVIDIOUS_BASES) {
+async function fetchVideoInfo(videoId) {
+  const instances = await getInstances();
+  for (const base of instances) {
     try {
       const r = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        signal: AbortSignal.timeout(10000),
-        headers: { 'User-Agent': 'NeonExtraction/1.0' },
+        signal: AbortSignal.timeout(20000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       });
-      if (r.ok) return await r.json();
+      if (r.ok) { const data = await r.json(); if (data.title) return data; }
     } catch {}
   }
-  throw new Error('Could not fetch video info. Please try again later.');
+  throw new Error('Could not fetch video info. Please try again.');
 }
 
 async function handleYouTubeDownload(url, quality, res) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Could not extract YouTube video ID');
 
-  const data = await fetchInvidious(videoId);
+  const data = await fetchVideoInfo(videoId);
   const safeName = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
-
   const qualityHeight = parseInt((quality || '1080p').replace('p', '')) || 1080;
 
   const muxed = data.formatStreams || [];
   const adaptive = data.adaptiveFormats || [];
 
-  // Try muxed (video+audio) first
+  // Best muxed format at or below requested quality
   const muxedMatch = muxed
     .filter(f => f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight)
     .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0))[0];
@@ -71,16 +74,12 @@ async function handleYouTubeDownload(url, quality, res) {
     return res.redirect(302, muxedMatch.url);
   }
 
-  // Fall back to video-only adaptive + audio
+  // Best video-only adaptive format
   const videoFormats = adaptive
     .filter(f => f.type?.startsWith('video/') && f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight)
     .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0));
 
   const bestVideo = videoFormats[0];
-  const bestAudio = adaptive
-    .filter(f => f.type?.startsWith('audio/'))
-    .sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0))[0];
-
   if (bestVideo?.url) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Filename');
@@ -92,7 +91,7 @@ async function handleYouTubeDownload(url, quality, res) {
 }
 
 export const config = {
-  api: { bodyParser: { sizeLimit: '1mb' }, responseLimit: false },
+  api: { bodyParser: { sizeLimit: '1mb' }, responseLimit: false, maxDuration: 30 },
 };
 
 export default async function handler(req, res) {
@@ -113,7 +112,7 @@ export default async function handler(req, res) {
       await handleYouTubeDownload(url, quality, res);
     } else {
       res.status(400).json({
-        error: `${platform} downloads are not supported on Vercel (serverless). Use the local server for full platform support.`,
+        error: `${platform} downloads require the local server. Vercel supports YouTube only.`,
       });
     }
   } catch (err) {
