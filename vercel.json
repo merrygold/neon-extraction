@@ -5,6 +5,8 @@
     }
   },
   "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/:path*" }
+    { "source": "/api/:path*", "destination": "/api/:path*" },
+    { "source": "/", "destination": "/public/index.html" },
+    { "source": "/assets/:path*", "destination": "/public/assets/:path*" }
   ]
 }

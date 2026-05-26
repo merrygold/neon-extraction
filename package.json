@@ -4,6 +4,8 @@
   "description": "Full HD Social Media Video Downloader",
   "private": true,
   "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
     "vercel-build": "echo done"
   },
   "dependencies": {},
