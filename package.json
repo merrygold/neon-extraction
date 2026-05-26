@@ -6,10 +6,8 @@
   "scripts": {
     "vercel-build": "echo done"
   },
-  "dependencies": {
-    "node-fetch": "^2.7.0"
-  },
+  "dependencies": {},
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }

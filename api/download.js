@@ -1,7 +1,3 @@
-var nodeFetch = require('node-fetch');
-var fetch = globalThis.fetch || nodeFetch;
-var AbortController = globalThis.AbortController || require('node-fetch').AbortController;
-
 var INSTANCES = [
   'https://inv.thepixora.com',
   'https://invidious.fdn.fr',
