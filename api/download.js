@@ -29,15 +29,19 @@ function extractVideoId(url) {
 
 function tryFetchVideo(videoId, timeout) {
   var promises = INSTANCES.map(function(instance) {
-    var controller = new AbortController();
-    var timer = setTimeout(function() { controller.abort(); }, timeout);
-    return fetch(instance + '/api/v1/videos/' + videoId, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    })
-      .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
-      .catch(function() { clearTimeout(timer); return null; });
+    return new Promise(function(resolve) {
+      try {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, timeout);
+        fetch(instance + '/api/v1/videos/' + videoId, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        })
+          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function(d) { if (d && d.title) { resolve(d); } else { resolve(null); } })
+          .catch(function() { clearTimeout(timer); resolve(null); });
+      } catch (e) { resolve(null); }
+    });
   });
   return Promise.all(promises).then(function(results) {
     return results.find(function(r) { return r !== null; }) || null;
