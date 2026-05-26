@@ -1,5 +1,17 @@
-var PRIMARY = 'https://inv.thepixora.com';
-var PROXY_URL = 'https://api.codetabs.com/v1/proxy?quest=';
+if (typeof fetch === 'undefined') {
+  module.exports = function handler(req, res) {
+    res.status(500).json({ error: 'Node.js 18+ required (fetch unavailable)' });
+  };
+  return;
+}
+
+var INSTANCES = [
+  'https://inv.thepixora.com',
+  'https://invidious.fdn.fr',
+  'https://vid.puffyan.us',
+  'https://invidious.nerdvpn.de',
+  'https://iv.ggtyler.dev',
+];
 
 function detectPlatform(url) {
   if (/youtube\.com|youtu\.be/i.test(url)) return 'youtube';
@@ -46,6 +58,27 @@ function parseFormats(data) {
   return qualities;
 }
 
+function tryFetchVideo(videoId, timeout) {
+  var promises = INSTANCES.map(function(instance) {
+    return new Promise(function(resolve) {
+      try {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, timeout);
+        fetch(instance + '/api/v1/videos/' + videoId, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        })
+          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function(d) { if (d && d.title) { resolve(d); } else { resolve(null); } })
+          .catch(function() { clearTimeout(timer); resolve(null); });
+      } catch (e) { resolve(null); }
+    });
+  });
+  return Promise.all(promises).then(function(results) {
+    return results.find(function(r) { return r !== null; }) || null;
+  });
+}
+
 module.exports = function handler(req, res) {
   function json(data, status) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -73,28 +106,8 @@ module.exports = function handler(req, res) {
     var videoId = extractVideoId(url);
     if (!videoId) return json({ error: 'Could not extract YouTube video ID' }, 400);
 
-    var directUrl = PRIMARY + '/api/v1/videos/' + videoId;
-    var proxyUrl = PROXY_URL + encodeURIComponent(directUrl);
-
-    var directSig, proxySig;
-    var directController = new AbortController();
-    var proxyController = new AbortController();
-    setTimeout(function() { directController.abort(); }, 5000);
-    setTimeout(function() { proxyController.abort(); }, 7000);
-
-    var directP = fetch(directUrl, { signal: directController.signal, headers: { 'User-Agent': 'Mozilla/5.0' } })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
-      .catch(function() { return null; });
-
-    var proxyP = fetch(proxyUrl, { signal: proxyController.signal })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
-      .catch(function() { return null; });
-
-    Promise.all([directP, proxyP]).then(function(results) {
-      var data = results[0] || results[1];
-      if (!data) return json({ error: 'Could not fetch video info. Please try again.' }, 500);
+    tryFetchVideo(videoId, 6000).then(function(data) {
+      if (!data) return json({ error: 'Could not fetch video info. All instances failed.' }, 500);
 
       var thumb = (data.videoThumbnails || []).find(function(t) { return t.quality === 'maxres'; }) || (data.videoThumbnails || [])[0];
       var thumbUrl = (thumb && thumb.url && thumb.url.indexOf('http') === 0) ? thumb.url : ('https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg');

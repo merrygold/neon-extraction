@@ -75,7 +75,6 @@ export default function App() {
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        redirect: "manual",
         body: JSON.stringify({
           url: url.trim(),
           quality: selectedQuality.label,
@@ -85,93 +84,38 @@ export default function App() {
 
       clearInterval(progressInterval)
 
-      if (res.status === 302 || res.status === 301) {
-        const redirectUrl = res.headers.get("Location") || res.headers.get("location")
-        if (redirectUrl) {
-          window.open(redirectUrl, "_blank")
-          setDownloadProgress(100)
-          setState("done")
-          showToast(`Download started — ${selectedQuality.label}`, "success")
-          setRecentDownloads(prev => [
-            {
-              platform: videoInfo.platform,
-              title: videoInfo.title,
-              quality: selectedQuality.label,
-              filename: videoInfo.title,
-              time: new Date().toLocaleTimeString(),
-            },
-            ...prev.slice(0, 4),
-          ])
-          setTimeout(() => setState("info"), 2000)
-          return
-        }
-      }
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Download failed" }))
         throw new Error(err.error || "Download failed")
       }
 
-      const contentType = res.headers.get("content-type") || ""
+      const data = await res.json()
 
-      if (contentType.includes("json")) {
-        const data = await res.json()
-        if (data.type === "multi" && data.videoUrl) {
-          window.open(data.videoUrl, "_blank")
-          setDownloadProgress(100)
-          setState("done")
-          showToast(`Download started — ${selectedQuality.label} (video only)`, "success")
-          setRecentDownloads(prev => [
-            {
-              platform: videoInfo.platform,
-              title: videoInfo.title,
-              quality: selectedQuality.label,
-              filename: data.filename || "video.mp4",
-              time: new Date().toLocaleTimeString(),
-            },
-            ...prev.slice(0, 4),
-          ])
-          setTimeout(() => setState("info"), 2000)
-          return
-        }
-        throw new Error("Unexpected response format")
+      if (data.url) {
+        window.open(data.url, "_blank")
+        setDownloadProgress(100)
+        setState("done")
+
+        const label = data.hasAudio
+          ? selectedQuality.label
+          : `${selectedQuality.label} (video only — use 720p or below for audio)`
+        showToast(`Download started — ${label}`, "success")
+
+        setRecentDownloads(prev => [
+          {
+            platform: videoInfo.platform,
+            title: videoInfo.title,
+            quality: selectedQuality.label,
+            filename: data.filename || "video.mp4",
+            time: new Date().toLocaleTimeString(),
+          },
+          ...prev.slice(0, 4),
+        ])
+        setTimeout(() => setState("info"), 2000)
+        return
       }
 
-      setDownloadProgress(100)
-
-      if (contentType.includes("video") || contentType.includes("octet-stream")) {
-        const blob = await res.blob()
-        const cd = res.headers.get("content-disposition")
-        let filename = "video.mp4"
-        if (cd) {
-          const match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/)
-          if (match) filename = match[1].replace(/['"]/g, "")
-        }
-
-        const a = document.createElement("a")
-        a.href = URL.createObjectURL(blob)
-        a.download = filename
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        URL.revokeObjectURL(a.href)
-      }
-
-      setState("done")
-      showToast(`Download complete — ${selectedQuality.label}`, "success")
-
-      setRecentDownloads(prev => [
-        {
-          platform: videoInfo.platform,
-          title: videoInfo.title,
-          quality: selectedQuality.label,
-          filename,
-          time: new Date().toLocaleTimeString(),
-        },
-        ...prev.slice(0, 4),
-      ])
-
-      setTimeout(() => setState("info"), 2000)
+      throw new Error("No download URL returned")
     } catch (err: any) {
       clearInterval(progressInterval)
       setState("info")

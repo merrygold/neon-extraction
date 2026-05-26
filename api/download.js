@@ -1,5 +1,17 @@
-var PRIMARY = 'https://inv.thepixora.com';
-var PROXY_URL = 'https://api.codetabs.com/v1/proxy?quest=';
+if (typeof fetch === 'undefined') {
+  module.exports = function handler(req, res) {
+    res.status(500).json({ error: 'Node.js 18+ required (fetch unavailable)' });
+  };
+  return;
+}
+
+var INSTANCES = [
+  'https://inv.thepixora.com',
+  'https://invidious.fdn.fr',
+  'https://vid.puffyan.us',
+  'https://invidious.nerdvpn.de',
+  'https://iv.ggtyler.dev',
+];
 
 function detectPlatform(url) {
   if (/youtube\.com|youtu\.be/i.test(url)) return 'youtube';
@@ -13,6 +25,23 @@ function detectPlatform(url) {
 function extractVideoId(url) {
   var m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
+}
+
+function tryFetchVideo(videoId, timeout) {
+  var promises = INSTANCES.map(function(instance) {
+    var controller = new AbortController();
+    var timer = setTimeout(function() { controller.abort(); }, timeout);
+    return fetch(instance + '/api/v1/videos/' + videoId, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    })
+      .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
+      .catch(function() { clearTimeout(timer); return null; });
+  });
+  return Promise.all(promises).then(function(results) {
+    return results.find(function(r) { return r !== null; }) || null;
+  });
 }
 
 module.exports = function handler(req, res) {
@@ -35,28 +64,9 @@ module.exports = function handler(req, res) {
     var videoId = extractVideoId(url);
     if (!videoId) return res.status(400).json({ error: 'Could not extract YouTube video ID' });
 
-    var directUrl = PRIMARY + '/api/v1/videos/' + videoId;
-    var proxyUrl = PROXY_URL + encodeURIComponent(directUrl);
-
-    var directController = new AbortController();
-    var proxyController = new AbortController();
-    setTimeout(function() { directController.abort(); }, 5000);
-    setTimeout(function() { proxyController.abort(); }, 7000);
-
-    var directP = fetch(directUrl, { signal: directController.signal, headers: { 'User-Agent': 'Mozilla/5.0' } })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
-      .catch(function() { return null; });
-
-    var proxyP = fetch(proxyUrl, { signal: proxyController.signal })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) { if (d && d.title) return d; throw new Error('no title'); })
-      .catch(function() { return null; });
-
-    Promise.all([directP, proxyP]).then(function(results) {
-      var data = results[0] || results[1];
+    tryFetchVideo(videoId, 6000).then(function(data) {
       if (!data) {
-        if (!res.headersSent) res.status(500).json({ error: 'Could not fetch video info' });
+        if (!res.headersSent) res.status(500).json({ error: 'Could not fetch video info from any instance' });
         return;
       }
 
@@ -71,9 +81,11 @@ module.exports = function handler(req, res) {
         .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
 
       if (muxedMatch && muxedMatch.url) {
-        res.setHeader('Content-Disposition', 'attachment; filename="' + safeName + '.mp4"');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-        return res.redirect(302, muxedMatch.url);
+        return res.status(200).json({
+          url: muxedMatch.url,
+          filename: safeName + '.mp4',
+          hasAudio: true,
+        });
       }
 
       var videoFormats = adaptive
@@ -81,10 +93,30 @@ module.exports = function handler(req, res) {
         .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); });
 
       var bestVideo = videoFormats[0];
+
+      var audioFormats = adaptive
+        .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0; })
+        .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
+      var bestAudio = audioFormats[0];
+
       if (bestVideo && bestVideo.url) {
-        res.setHeader('X-Filename', safeName + '.mp4');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Filename');
-        return res.redirect(302, bestVideo.url);
+        return res.status(200).json({
+          url: bestVideo.url,
+          filename: safeName + '.mp4',
+          hasAudio: false,
+          audioUrl: bestAudio ? bestAudio.url : null,
+          qualityLabel: bestVideo.qualityLabel,
+        });
+      }
+
+      var fallback = muxed.sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
+      if (fallback && fallback.url) {
+        return res.status(200).json({
+          url: fallback.url,
+          filename: safeName + '.mp4',
+          hasAudio: true,
+          fallback: true,
+        });
       }
 
       if (!res.headersSent) res.status(500).json({ error: 'No downloadable format found' });
