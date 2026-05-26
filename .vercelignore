@@ -1,5 +1,7 @@
 neon-extraction/
 downloads/
+bin/
+server.js
 *.zip
 .vercel
 download-ffmpeg.cjs
