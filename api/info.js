@@ -1,9 +1,6 @@
-if (typeof fetch === 'undefined') {
-  module.exports = function handler(req, res) {
-    res.status(500).json({ error: 'Node.js 18+ required (fetch unavailable)' });
-  };
-  return;
-}
+var nodeFetch = require('node-fetch');
+var fetch = globalThis.fetch || nodeFetch;
+var AbortController = globalThis.AbortController || require('node-fetch').AbortController;
 
 var INSTANCES = [
   'https://inv.thepixora.com',
