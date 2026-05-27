@@ -43,74 +43,10 @@ function tryFetchVideo(videoId, timeout) {
   });
 }
 
-function tryLatestVersion(videoId, itag, instance) {
-  var url = instance + '/latest_version?id=' + videoId + '&itag=' + (itag || '18') + '&local=true';
-  return fetch(url, { redirect: 'manual', headers: { 'User-Agent': 'Mozilla/5.0' } })
-    .then(function(r) {
-      if (r.status >= 300 && r.status < 400) {
-        var location = r.headers.get('location');
-        if (location) {
-          if (location.indexOf('http') !== 0) {
-            location = instance + (location.indexOf('/') === 0 ? '' : '/') + location;
-          }
-          return { url: location, hasAudio: true };
-        }
-      }
-      if (r.ok) {
-        return { url: url, hasAudio: true, proxied: true };
-      }
-      return null;
-    })
-    .catch(function() { return null; });
-}
-
-function tryInvidiousDownload(videoId, quality, timeout) {
-  return tryFetchVideo(videoId, timeout).then(function(result) {
-    if (!result) return null;
-
-    var data = result.data;
-    var instance = result.instance;
-    var safeName = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
-    var qualityHeight = parseInt((quality || '1080p').replace('p', '')) || 1080;
-
-    var muxed = data.formatStreams || [];
-    var adaptive = data.adaptiveFormats || [];
-
-    var muxedMatch = muxed
-      .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
-      .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-
-    if (muxedMatch && muxedMatch.url) {
-      return { url: muxedMatch.url, filename: safeName + '.mp4', hasAudio: true };
-    }
-
-    var videoFormats = adaptive
-      .filter(function(f) { return f.type && f.type.indexOf('video/') === 0 && f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
-      .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); });
-
-    var bestVideo = videoFormats[0];
-    var audioFormats = adaptive
-      .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0; })
-      .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
-    var bestAudio = audioFormats[0];
-
-    if (bestVideo && bestVideo.url) {
-      return {
-        url: bestVideo.url,
-        filename: safeName + '.mp4',
-        hasAudio: false,
-        audioUrl: bestAudio ? bestAudio.url : null,
-        qualityLabel: bestVideo.qualityLabel,
-      };
-    }
-
-    var fallback = muxed.sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-    if (fallback && fallback.url) {
-      return { url: fallback.url, filename: safeName + '.mp4', hasAudio: true, fallback: true };
-    }
-
-    return { tryProxy: true, instance: instance, itag: muxedMatch ? muxedMatch.itag : 18 };
-  });
+function makeStreamUrl(videoUrl, filename, req) {
+  var protocol = req.headers && req.headers['x-forwarded-proto'] ? req.headers['x-forwarded-proto'] : 'https';
+  var host = req.headers && req.headers['host'] ? req.headers['host'] : 'localhost:3000';
+  return protocol + '://' + host + '/api/stream?url=' + encodeURIComponent(videoUrl) + '&filename=' + encodeURIComponent(filename);
 }
 
 module.exports = function handler(req, res) {
@@ -134,52 +70,75 @@ module.exports = function handler(req, res) {
       var videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Could not extract YouTube video ID' });
 
-      tryInvidiousDownload(videoId, quality, 6000).then(function(dlResult) {
-        if (dlResult && dlResult.url) {
-          return res.status(200).json(dlResult);
-        }
+      tryFetchVideo(videoId, 6000).then(function(result) {
+        if (result && result.data) {
+          var data = result.data;
+          var instance = result.instance;
+          var safeName = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
+          var filename = safeName + '.mp4';
 
-        if (dlResult && dlResult.tryProxy) {
-          return tryLatestVersion(videoId, dlResult.itag, dlResult.instance).then(function(proxyResult) {
-            if (proxyResult && proxyResult.url) {
-              return res.status(200).json({
-                url: proxyResult.url,
-                filename: (dlResult.filename || 'video') + '.mp4',
-                hasAudio: proxyResult.hasAudio,
-              });
-            }
+          var muxed = data.formatStreams || [];
+          var adaptive = data.adaptiveFormats || [];
+
+          var muxedMatch = muxed
+            .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
+            .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
+
+          if (muxedMatch && muxedMatch.url) {
             return res.status(200).json({
-              url: 'https://cobalt.tools/',
-              filename: 'video.mp4',
+              url: makeStreamUrl(muxedMatch.url, filename, req),
+              filename: filename,
               hasAudio: true,
-              redirect: true,
-              message: 'Direct download unavailable. Use cobalt.tools to download this video.',
-            });
-          });
-        }
-
-        var instanceAttempts = INSTANCES.slice(0, 3);
-        var proxyPromises = instanceAttempts.map(function(inst) {
-          return tryLatestVersion(videoId, 18, inst);
-        });
-
-        Promise.all(proxyPromises).then(function(proxyResults) {
-          var working = proxyResults.find(function(r) { return r !== null && r.url; });
-          if (working) {
-            return res.status(200).json({
-              url: working.url,
-              filename: 'video.mp4',
-              hasAudio: working.hasAudio,
             });
           }
 
+          var videoFormats = adaptive
+            .filter(function(f) { return f.type && f.type.indexOf('video/') === 0 && f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
+            .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); });
+
+          var bestVideo = videoFormats[0];
+          var audioFormats = adaptive
+            .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0; })
+            .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
+          var bestAudio = audioFormats[0];
+
+          if (bestVideo && bestVideo.url) {
+            return res.status(200).json({
+              url: makeStreamUrl(bestVideo.url, filename, req),
+              filename: filename,
+              hasAudio: false,
+              audioUrl: bestAudio ? bestAudio.url : null,
+              qualityLabel: bestVideo.qualityLabel,
+            });
+          }
+
+          var fallback = muxed.sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
+          if (fallback && fallback.url) {
+            return res.status(200).json({
+              url: makeStreamUrl(fallback.url, filename, req),
+              filename: filename,
+              hasAudio: true,
+              fallback: true,
+            });
+          }
+
+          var companionUrl = instance + '/latest_version?id=' + videoId + '&itag=18&local=true';
           return res.status(200).json({
-            url: 'https://cobalt.tools/',
-            filename: 'video.mp4',
+            url: makeStreamUrl(companionUrl, filename, req),
+            filename: filename,
             hasAudio: true,
-            redirect: true,
-            message: 'Direct download unavailable. Use cobalt.tools to download this video.',
           });
+        }
+
+        var companionAttempts = INSTANCES.slice(0, 3);
+        for (var i = 0; i < companionAttempts.length; i++) {
+          var companionUrl2 = companionAttempts[i] + '/latest_version?id=' + videoId + '&itag=18&local=true';
+        }
+
+        return res.status(200).json({
+          url: makeStreamUrl(companionAttempts[0] + '/latest_version?id=' + videoId + '&itag=18&local=true', 'video.mp4', req),
+          filename: 'video.mp4',
+          hasAudio: true,
         });
       }).catch(function(err) {
         console.error('[NEON] Download error:', err);

@@ -6,7 +6,10 @@
       "maxDuration": 15
     },
     "api/download.js": {
-      "maxDuration": 30
+      "maxDuration": 15
+    },
+    "api/stream.js": {
+      "maxDuration": 60
     }
   }
 }
