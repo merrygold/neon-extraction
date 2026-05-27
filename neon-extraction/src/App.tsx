@@ -92,6 +92,15 @@ export default function App() {
       const data = await res.json()
 
       if (data.url) {
+        if (data.redirect) {
+          window.open(data.url, "_blank")
+          setDownloadProgress(100)
+          setState("done")
+          showToast(data.message || "Redirecting to download service", "success")
+          setTimeout(() => setState("info"), 3000)
+          return
+        }
+
         window.open(data.url, "_blank")
         setDownloadProgress(100)
         setState("done")
