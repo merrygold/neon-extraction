@@ -22,31 +22,11 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-function tryFetchVideo(videoId, timeout) {
-  var promises = INSTANCES.map(function(instance) {
-    return new Promise(function(resolve) {
-      try {
-        var controller = new AbortController();
-        var timer = setTimeout(function() { controller.abort(); }, timeout);
-        fetch(instance + '/api/v1/videos/' + videoId, {
-          signal: controller.signal,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        })
-          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-          .then(function(d) { if (d && d.title) { resolve({ data: d, instance: instance }); } else { resolve(null); } })
-          .catch(function() { clearTimeout(timer); resolve(null); });
-      } catch (e) { resolve(null); }
-    });
-  });
-  return Promise.all(promises).then(function(results) {
-    return results.find(function(r) { return r !== null; }) || null;
-  });
-}
-
-function makeStreamUrl(videoUrl, filename, req) {
+function makeStreamUrl(params, req) {
   var protocol = req.headers && req.headers['x-forwarded-proto'] ? req.headers['x-forwarded-proto'] : 'https';
   var host = req.headers && req.headers['host'] ? req.headers['host'] : 'localhost:3000';
-  return protocol + '://' + host + '/api/stream?url=' + encodeURIComponent(videoUrl) + '&filename=' + encodeURIComponent(filename);
+  var qs = Object.keys(params).map(function(k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
+  return protocol + '://' + host + '/api/stream?' + qs;
 }
 
 module.exports = function handler(req, res) {
@@ -70,79 +50,24 @@ module.exports = function handler(req, res) {
       var videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Could not extract YouTube video ID' });
 
-      tryFetchVideo(videoId, 6000).then(function(result) {
-        if (result && result.data) {
-          var data = result.data;
-          var instance = result.instance;
-          var safeName = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
-          var filename = safeName + '.mp4';
+      var itag = '18';
+      if (qualityHeight <= 360) itag = '18';
+      else if (qualityHeight <= 480) itag = '18';
+      else if (qualityHeight <= 720) itag = '22';
+      else itag = '22';
 
-          var muxed = data.formatStreams || [];
-          var adaptive = data.adaptiveFormats || [];
+      var safeName = 'video';
+      if (body.format_id && body.format_id !== 'best') itag = body.format_id;
 
-          var muxedMatch = muxed
-            .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
-            .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-
-          if (muxedMatch && muxedMatch.url) {
-            return res.status(200).json({
-              url: makeStreamUrl(muxedMatch.url, filename, req),
-              filename: filename,
-              hasAudio: true,
-            });
-          }
-
-          var videoFormats = adaptive
-            .filter(function(f) { return f.type && f.type.indexOf('video/') === 0 && f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight; })
-            .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); });
-
-          var bestVideo = videoFormats[0];
-          var audioFormats = adaptive
-            .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0; })
-            .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
-          var bestAudio = audioFormats[0];
-
-          if (bestVideo && bestVideo.url) {
-            return res.status(200).json({
-              url: makeStreamUrl(bestVideo.url, filename, req),
-              filename: filename,
-              hasAudio: false,
-              audioUrl: bestAudio ? bestAudio.url : null,
-              qualityLabel: bestVideo.qualityLabel,
-            });
-          }
-
-          var fallback = muxed.sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-          if (fallback && fallback.url) {
-            return res.status(200).json({
-              url: makeStreamUrl(fallback.url, filename, req),
-              filename: filename,
-              hasAudio: true,
-              fallback: true,
-            });
-          }
-
-          var companionUrl = instance + '/latest_version?id=' + videoId + '&itag=18&local=true';
-          return res.status(200).json({
-            url: makeStreamUrl(companionUrl, filename, req),
-            filename: filename,
-            hasAudio: true,
-          });
-        }
-
-        var companionAttempts = INSTANCES.slice(0, 3);
-        for (var i = 0; i < companionAttempts.length; i++) {
-          var companionUrl2 = companionAttempts[i] + '/latest_version?id=' + videoId + '&itag=18&local=true';
-        }
-
-        return res.status(200).json({
-          url: makeStreamUrl(companionAttempts[0] + '/latest_version?id=' + videoId + '&itag=18&local=true', 'video.mp4', req),
-          filename: 'video.mp4',
-          hasAudio: true,
-        });
-      }).catch(function(err) {
-        console.error('[NEON] Download error:', err);
-        if (!res.headersSent) res.status(500).json({ error: err.message || 'Download failed' });
+      res.status(200).json({
+        url: makeStreamUrl({
+          id: videoId,
+          itag: itag,
+          quality: String(qualityHeight),
+          filename: safeName + '.mp4',
+        }, req),
+        filename: safeName + '.mp4',
+        hasAudio: true,
       });
       return;
     }
