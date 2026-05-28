@@ -124,26 +124,21 @@ module.exports = function handler(req, res) {
       var videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Could not extract YouTube video ID' });
 
-      fetchYouTubePlayer(videoId).then(function(playerData) {
-        var title = (playerData.videoDetails && playerData.videoDetails.title) || 'video';
-        var safeName = title.replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
-        var filename = safeName + '.mp4';
-        var formats = (playerData.streamingData && playerData.streamingData.formats) || [];
-        var adaptiveFormats = (playerData.streamingData && playerData.streamingData.adaptiveFormats) || [];
+      var protocol = req.headers && req.headers['x-forwarded-proto'] ? req.headers['x-forwarded-proto'] : 'https';
+      var host = req.headers && req.headers['host'] ? req.headers['host'] : 'localhost:3000';
+      var edgeUrl = protocol + '://' + host + '/api/yt-dl?id=' + encodeURIComponent(videoId) + '&quality=' + qualityHeight;
 
-        var muxedMatch = findFormat(formats, qualityHeight, true);
-        if (muxedMatch && muxedMatch._streamUrl) return res.status(200).json({ url: muxedMatch._streamUrl, filename: filename, hasAudio: true });
-
-        var videoMatch = findFormat(adaptiveFormats.filter(function(f) { return f.mimeType && f.mimeType.indexOf('video/') === 0; }), qualityHeight, true);
-        var audioFormats = adaptiveFormats.filter(function(f) { return f.mimeType && f.mimeType.indexOf('audio/') === 0 && getStreamUrl(f); }).sort(function(a, b) { return (b.bitrate || 0) - (a.bitrate || 0); });
-        var bestAudioUrl = audioFormats.length > 0 ? getStreamUrl(audioFormats[0]) : null;
-
-        if (videoMatch && videoMatch._streamUrl) return res.status(200).json({ url: videoMatch._streamUrl, filename: filename, hasAudio: false, audioUrl: bestAudioUrl, qualityLabel: videoMatch.qualityLabel });
-
-        var anyMuxed = findFormat(formats, 99999, true);
-        if (anyMuxed && anyMuxed._streamUrl) return res.status(200).json({ url: anyMuxed._streamUrl, filename: filename, hasAudio: true, fallback: true });
-
-        res.status(200).json({ url: 'https://cobalt.tools/', filename: filename, hasAudio: true, redirect: true, message: 'Could not get direct download URL. Use cobalt.tools to download.' });
+      fetch(edgeUrl).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.url && !data.redirect) {
+          return res.status(200).json(data);
+        }
+        fetchCobalt(url).then(function(cobaltData) {
+          var cobaltUrl = getCobaltUrl(cobaltData);
+          if (cobaltUrl) return res.status(200).json({ url: cobaltUrl, filename: cobaltData.output?.filename || cobaltData.filename || 'video.mp4', hasAudio: true });
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not get direct download URL. Use cobalt.tools to download.' });
+        }).catch(function() {
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not get direct download URL. Use cobalt.tools to download.' });
+        });
       }).catch(function() {
         fetchCobalt(url).then(function(cobaltData) {
           var cobaltUrl = getCobaltUrl(cobaltData);

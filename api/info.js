@@ -23,58 +23,31 @@ function extractVideoId(url) {
 }
 
 var YT_CLIENTS = [
-  { name: 'ANDROID_VR', clientName: 'ANDROID_VR', clientVersion: '1.30.1', ua: 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6)', sdk: '32', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
-  { name: 'ANDROID_VR_V2', clientName: 'ANDROID_VR', clientVersion: '1.35.1', ua: 'com.google.android.apps.youtube.vr/1.35.1 (Linux; U; Android 14; Quest 3)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
-  { name: 'ANDROID', clientName: 'ANDROID', clientVersion: '19.02.39', ua: 'com.google.android.youtube/19.02.39 (Linux; U; Android 14; Pixel 8 Pro)', sdk: '30', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
-  { name: 'ANDROID_MUSIC', clientName: 'ANDROID_MUSIC', clientVersion: '7.11.50', ua: 'com.google.android.apps.youtube.music/7.11.50 (Linux; U; Android 14)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { clientName: 'ANDROID_VR', clientVersion: '1.30.1', ua: 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6)', sdk: '32', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { clientName: 'ANDROID_VR', clientVersion: '1.35.1', ua: 'com.google.android.apps.youtube.vr/1.35.1 (Linux; U; Android 14; Quest 3)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { clientName: 'ANDROID', clientVersion: '19.02.39', ua: 'com.google.android.youtube/19.02.39 (Linux; U; Android 14; Pixel 8 Pro)', sdk: '30', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { clientName: 'ANDROID_MUSIC', clientVersion: '7.11.50', ua: 'com.google.android.apps.youtube.music/7.11.50 (Linux; U; Android 14)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
 ];
 
 function fetchYouTubePlayer(videoId) {
-  var clients = YT_CLIENTS.slice();
+  var chain = Promise.reject(new Error('no clients'));
+  YT_CLIENTS.forEach(function(c) {
+    chain = chain.catch(function() { return tryYouTubeClient(videoId, c); });
+  });
+  return chain;
+}
 
-  function tryNext() {
-    if (clients.length === 0) return Promise.reject(new Error('All YouTube clients failed'));
-
-    var c = clients.shift();
-    var ctx = {
-      client: {
-        clientName: c.clientName,
-        clientVersion: c.clientVersion,
-        hl: 'en',
-        gl: 'US',
-      },
-    };
-    if (c.sdk) ctx.client.androidSdkVersion = c.sdk;
-
-    var body = JSON.stringify({
-      videoId: videoId,
-      context: ctx,
-      contentCheckOk: true,
-      racyCheckOk: true,
+function tryYouTubeClient(videoId, c) {
+  var ctx = { client: { clientName: c.clientName, clientVersion: c.clientVersion, hl: 'en', gl: 'US' } };
+  if (c.sdk) ctx.client.androidSdkVersion = c.sdk;
+  var body = JSON.stringify({ videoId: videoId, context: ctx, contentCheckOk: true, racyCheckOk: true });
+  var url = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=' + c.key;
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua }, body: body })
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(data) {
+      if (data.playabilityStatus && data.playabilityStatus.status === 'OK' && data.videoDetails) return data;
+      throw new Error(data.playabilityStatus?.status || 'failed');
     });
-
-    var url = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
-    if (c.key) url += '&key=' + c.key;
-
-    return fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': c.ua,
-      },
-      body: body,
-    })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(data) {
-        if (data.playabilityStatus && data.playabilityStatus.status === 'OK' && data.videoDetails) {
-          return data;
-        }
-        return tryNext();
-      })
-      .catch(function() { return tryNext(); });
-  }
-
-  return tryNext();
 }
 
 function parseYouTubeFormats(playerData) {
