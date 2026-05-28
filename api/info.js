@@ -22,7 +22,109 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-function parseFormats(data) {
+function fetchYouTubePlayer(videoId) {
+  var body = JSON.stringify({
+    videoId: videoId,
+    context: {
+      client: {
+        clientName: 'ANDROID_VR',
+        clientVersion: '1.30.1',
+        hl: 'en',
+        gl: 'US',
+        androidSdkVersion: '32',
+      },
+    },
+    contentCheckOk: true,
+    racyCheckOk: true,
+  });
+
+  return fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6 Build/SD1A.210817.015.A4)',
+    },
+    body: body,
+  })
+    .then(function(r) { if (!r.ok) throw new Error('YouTube API HTTP ' + r.status); return r.json(); })
+    .then(function(data) {
+      if (data.playabilityStatus && data.playabilityStatus.status !== 'OK') {
+        throw new Error(data.playabilityStatus.reason || data.playabilityStatus.status);
+      }
+      return data;
+    });
+}
+
+function parseYouTubeFormats(playerData) {
+  var formats = (playerData.streamingData && playerData.streamingData.formats) || [];
+  var adaptiveFormats = (playerData.streamingData && playerData.streamingData.adaptiveFormats) || [];
+  var seen = {};
+  var qualities = [];
+
+  var allFormats = formats.concat(adaptiveFormats).filter(function(f) {
+    return f.mimeType && f.mimeType.indexOf('video/') === 0 && f.qualityLabel;
+  });
+
+  allFormats.sort(function(a, b) {
+    return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0);
+  });
+
+  for (var i = 0; i < allFormats.length; i++) {
+    var f = allFormats[i];
+    var label = f.qualityLabel || '360p';
+    if (!seen[label]) {
+      seen[label] = true;
+      var isMuxed = formats.some(function(m) { return m.itag === f.itag; });
+      var codec = '';
+      if (f.mimeType) {
+        var cm = f.mimeType.match(/codecs="([^"]+)"/);
+        codec = cm ? cm[1].split(',')[0].trim() : '';
+      }
+      qualities.push({
+        label: label,
+        height: parseInt(label) || 0,
+        format_id: f.itag ? String(f.itag) : '',
+        ext: f.mimeType && f.mimeType.indexOf('mp4') !== -1 ? 'mp4' : 'webm',
+        filesize: f.contentLength ? parseInt(f.contentLength) : null,
+        vcodec: codec,
+        acodec: isMuxed ? 'aac' : '',
+        vbr: f.bitrate ? Math.round(f.bitrate / 1000) : null,
+        abr: null,
+        tbr: null,
+        hasAudio: isMuxed,
+        isMuxed: isMuxed,
+      });
+    }
+  }
+
+  if (qualities.length === 0) {
+    qualities.push({ label: '360p', height: 360, format_id: '18', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true });
+  }
+  return qualities;
+}
+
+function tryFetchVideo(videoId, timeout) {
+  var promises = INSTANCES.map(function(instance) {
+    return new Promise(function(resolve) {
+      try {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, timeout);
+        fetch(instance + '/api/v1/videos/' + videoId, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        })
+          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function(d) { if (d && d.title) { resolve({ data: d, instance: instance }); } else { resolve(null); } })
+          .catch(function() { clearTimeout(timer); resolve(null); });
+      } catch (e) { resolve(null); }
+    });
+  });
+  return Promise.all(promises).then(function(results) {
+    return results.find(function(r) { return r !== null; }) || null;
+  });
+}
+
+function parseInvidiousFormats(data) {
   var seen = {};
   var qualities = [];
   var muxed = data.formatStreams || [];
@@ -51,37 +153,6 @@ function parseFormats(data) {
     qualities.push({ label: '360p', height: 360, format_id: '18', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true });
   }
   return qualities;
-}
-
-function defaultYouTubeQualities() {
-  return [
-    { label: '2160p', height: 2160, format_id: '', ext: 'mp4', filesize: null, vcodec: 'vp9', acodec: 'opus', vbr: null, abr: null, tbr: null, hasAudio: false, isMuxed: false },
-    { label: '1080p', height: 1080, format_id: '', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: false, isMuxed: false },
-    { label: '720p', height: 720, format_id: '', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true },
-    { label: '480p', height: 480, format_id: '', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true },
-    { label: '360p', height: 360, format_id: '18', ext: 'mp4', filesize: null, vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true },
-  ];
-}
-
-function tryFetchVideo(videoId, timeout) {
-  var promises = INSTANCES.map(function(instance) {
-    return new Promise(function(resolve) {
-      try {
-        var controller = new AbortController();
-        var timer = setTimeout(function() { controller.abort(); }, timeout);
-        fetch(instance + '/api/v1/videos/' + videoId, {
-          signal: controller.signal,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        })
-          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-          .then(function(d) { if (d && d.title) { resolve({ data: d, instance: instance }); } else { resolve(null); } })
-          .catch(function() { clearTimeout(timer); resolve(null); });
-      } catch (e) { resolve(null); }
-    });
-  });
-  return Promise.all(promises).then(function(results) {
-    return results.find(function(r) { return r !== null; }) || null;
-  });
 }
 
 function fetchOEmbed(url) {
@@ -129,40 +200,60 @@ module.exports = function handler(req, res) {
       var videoId = extractVideoId(url);
       if (!videoId) return json({ error: 'Could not extract YouTube video ID' }, 400);
 
-      tryFetchVideo(videoId, 5000).then(function(result) {
-        if (result && result.data) {
-          var data = result.data;
-          var thumb = (data.videoThumbnails || []).find(function(t) { return t.quality === 'maxres'; }) || (data.videoThumbnails || [])[0];
-          var thumbUrl = (thumb && thumb.url && thumb.url.indexOf('http') === 0) ? thumb.url : ('https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg');
-
-          json({
-            title: data.title || 'Untitled', thumbnail: thumbUrl,
-            duration: data.lengthSeconds || 0,
-            description: (data.description || '').slice(0, 300),
-            platform: 'youtube', qualities: parseFormats(data),
-            uploader: data.author || '',
-            view_count: data.viewCount || 0, like_count: data.likeCount || 0,
-          });
-          return;
+      fetchYouTubePlayer(videoId).then(function(playerData) {
+        var details = playerData.videoDetails || {};
+        var microformat = playerData.microformat && playerData.microformat.playerMicroformatRenderer || {};
+        var thumb = 'https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg';
+        if (details.thumbnail && details.thumbnail.thumbnails && details.thumbnail.thumbnails.length > 0) {
+          var best = details.thumbnail.thumbnails[details.thumbnail.thumbnails.length - 1];
+          if (best.url) thumb = best.url;
         }
 
-        fetchOEmbed(url).then(function(oembed) {
-          if (!oembed) return json({ error: 'Could not fetch video info. Try again later.' }, 500);
+        json({
+          title: details.title || 'Untitled',
+          thumbnail: thumb,
+          duration: parseInt(details.lengthSeconds) || 0,
+          description: (details.shortDescription || '').slice(0, 300),
+          platform: 'youtube',
+          qualities: parseYouTubeFormats(playerData),
+          uploader: details.author || '',
+          view_count: parseInt(details.viewCount) || 0,
+          like_count: 0,
+        });
+      }).catch(function(ytErr) {
+        console.error('[NEON] YouTube player error:', ytErr.message);
 
-          json({
-            title: oembed.title || 'Untitled',
-            thumbnail: 'https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg',
-            duration: 0,
-            description: '',
-            platform: 'youtube',
-            qualities: defaultYouTubeQualities(),
-            uploader: oembed.author_name || '',
-            view_count: 0, like_count: 0,
+        tryFetchVideo(videoId, 5000).then(function(result) {
+          if (result && result.data) {
+            var data = result.data;
+            var thumb2 = (data.videoThumbnails || []).find(function(t) { return t.quality === 'maxres'; }) || (data.videoThumbnails || [])[0];
+            var thumbUrl = (thumb2 && thumb2.url && thumb2.url.indexOf('http') === 0) ? thumb2.url : ('https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg');
+
+            json({
+              title: data.title || 'Untitled', thumbnail: thumbUrl,
+              duration: data.lengthSeconds || 0,
+              description: (data.description || '').slice(0, 300),
+              platform: 'youtube', qualities: parseInvidiousFormats(data),
+              uploader: data.author || '',
+              view_count: data.viewCount || 0, like_count: data.likeCount || 0,
+            });
+            return;
+          }
+
+          fetchOEmbed(url).then(function(oembed) {
+            if (!oembed) return json({ error: 'Could not fetch video info. Try again later.' }, 500);
+            json({
+              title: oembed.title || 'Untitled',
+              thumbnail: 'https://i.ytimg.com/vi/' + videoId + '/maxresdefault.jpg',
+              duration: 0, description: '', platform: 'youtube',
+              qualities: [{
+                label: '360p', height: 360, format_id: '18', ext: 'mp4', filesize: null,
+                vcodec: 'h264', acodec: 'aac', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true,
+              }],
+              uploader: oembed.author_name || '', view_count: 0, like_count: 0,
+            });
           });
         });
-      }).catch(function(err) {
-        console.error('[NEON] Info error:', err);
-        json({ error: err.message || 'Failed to extract video info' }, 500);
       });
       return;
     }
@@ -172,12 +263,9 @@ module.exports = function handler(req, res) {
         json({
           title: noembed.title || 'Video from ' + platform,
           thumbnail: noembed.thumbnail_url || null,
-          duration: 0,
-          description: '',
-          platform: platform,
+          duration: 0, description: '', platform: platform,
           qualities: [{ label: 'best', height: 720, format_id: 'best', ext: 'mp4', filesize: null, vcodec: '', acodec: '', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true }],
-          uploader: noembed.author_name || '',
-          view_count: 0, like_count: 0,
+          uploader: noembed.author_name || '', view_count: 0, like_count: 0,
         });
         return;
       }
@@ -190,47 +278,17 @@ module.exports = function handler(req, res) {
           .then(function(tw) {
             json({
               title: tw.author_name ? tw.author_name + ' on X' : 'Post on X',
-              thumbnail: null,
-              duration: 0,
-              description: '',
-              platform: 'twitter',
+              thumbnail: null, duration: 0, description: '', platform: 'twitter',
               qualities: [{ label: 'best', height: 720, format_id: 'best', ext: 'mp4', filesize: null, vcodec: '', acodec: '', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true }],
-              uploader: tw.author_name || '',
-              view_count: 0, like_count: 0,
+              uploader: tw.author_name || '', view_count: 0, like_count: 0,
             });
           })
-          .catch(function() {
-            json(makeGenericResponse(platform));
-          });
+          .catch(function() { json(makeGenericResponse(platform)); });
         return;
       }
 
       json(makeGenericResponse(platform));
-    }).catch(function() {
-      if (platform === 'twitter') {
-        fetch('https://publish.twitter.com/oembed?url=' + encodeURIComponent(url) + '&omit_script=true', {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        })
-          .then(function(r) { if (!r.ok) throw new Error('Twitter oEmbed HTTP ' + r.status); return r.json(); })
-          .then(function(tw) {
-            json({
-              title: tw.author_name ? tw.author_name + ' on X' : 'Post on X',
-              thumbnail: null,
-              duration: 0,
-              description: '',
-              platform: 'twitter',
-              qualities: [{ label: 'best', height: 720, format_id: 'best', ext: 'mp4', filesize: null, vcodec: '', acodec: '', vbr: null, abr: null, tbr: null, hasAudio: true, isMuxed: true }],
-              uploader: tw.author_name || '',
-              view_count: 0, like_count: 0,
-            });
-          })
-          .catch(function() {
-            json(makeGenericResponse(platform));
-          });
-        return;
-      }
-      json(makeGenericResponse(platform));
-    });
+    }).catch(function() { json(makeGenericResponse(platform)); });
   } catch (err) {
     console.error('[NEON] Sync error:', err);
     json({ error: 'Internal error' }, 500);

@@ -22,11 +22,85 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-function makeStreamUrl(params, req) {
-  var protocol = req.headers && req.headers['x-forwarded-proto'] ? req.headers['x-forwarded-proto'] : 'https';
-  var host = req.headers && req.headers['host'] ? req.headers['host'] : 'localhost:3000';
-  var qs = Object.keys(params).map(function(k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
-  return protocol + '://' + host + '/api/stream?' + qs;
+function tryInvidious(videoId, timeout) {
+  var promises = INSTANCES.map(function(instance) {
+    return new Promise(function(resolve) {
+      try {
+        var controller = new AbortController();
+        var timer = setTimeout(function() { controller.abort(); }, timeout);
+        fetch(instance + '/api/v1/videos/' + videoId, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        })
+          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function(d) { if (d && d.title) { resolve({ data: d, instance: instance }); } else { resolve(null); } })
+          .catch(function() { clearTimeout(timer); resolve(null); });
+      } catch (e) { resolve(null); }
+    });
+  });
+  return Promise.all(promises).then(function(results) {
+    return results.find(function(r) { return r !== null; }) || null;
+  });
+}
+
+function fetchYouTubePlayer(videoId) {
+  var body = JSON.stringify({
+    videoId: videoId,
+    context: {
+      client: {
+        clientName: 'ANDROID_VR',
+        clientVersion: '1.30.1',
+        hl: 'en',
+        gl: 'US',
+        androidSdkVersion: '32',
+      },
+    },
+    contentCheckOk: true,
+    racyCheckOk: true,
+  });
+
+  return fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6 Build/SD1A.210817.015.A4)',
+    },
+    body: body,
+  })
+    .then(function(r) { if (!r.ok) throw new Error('YouTube API HTTP ' + r.status); return r.json(); })
+    .then(function(data) {
+      if (data.playabilityStatus && data.playabilityStatus.status !== 'OK') {
+        throw new Error(data.playabilityStatus.reason || data.playabilityStatus.status);
+      }
+      return data;
+    });
+}
+
+function isValidStreamUrl(url) {
+  if (!url) return false;
+  return url.indexOf('http') === 0 && url.indexOf('.googlevideo.com/') !== -1;
+}
+
+function findFormat(formats, qualityHeight, preferMp4) {
+  var valid = formats.filter(function(f) {
+    if (!isValidStreamUrl(f.url)) return false;
+    var h = f.height || parseInt(f.qualityLabel) || 0;
+    return h <= qualityHeight;
+  });
+
+  valid.sort(function(a, b) {
+    var ha = a.height || parseInt(a.qualityLabel) || 0;
+    var hb = b.height || parseInt(b.qualityLabel) || 0;
+    if (hb !== ha) return hb - ha;
+    if (preferMp4) {
+      var aMp4 = a.mimeType && a.mimeType.indexOf('mp4') !== -1 ? 1 : 0;
+      var bMp4 = b.mimeType && b.mimeType.indexOf('mp4') !== -1 ? 1 : 0;
+      return bMp4 - aMp4;
+    }
+    return 0;
+  });
+
+  return valid[0] || null;
 }
 
 module.exports = function handler(req, res) {
@@ -50,24 +124,108 @@ module.exports = function handler(req, res) {
       var videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Could not extract YouTube video ID' });
 
-      var itag = '18';
-      if (qualityHeight <= 360) itag = '18';
-      else if (qualityHeight <= 480) itag = '18';
-      else if (qualityHeight <= 720) itag = '22';
-      else itag = '22';
+      fetchYouTubePlayer(videoId).then(function(playerData) {
+        var title = (playerData.videoDetails && playerData.videoDetails.title) || 'video';
+        var safeName = title.replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
+        var filename = safeName + '.mp4';
 
-      var safeName = 'video';
-      if (body.format_id && body.format_id !== 'best') itag = body.format_id;
+        var formats = (playerData.streamingData && playerData.streamingData.formats) || [];
+        var adaptiveFormats = (playerData.streamingData && playerData.streamingData.adaptiveFormats) || [];
 
-      res.status(200).json({
-        url: makeStreamUrl({
-          id: videoId,
-          itag: itag,
-          quality: String(qualityHeight),
-          filename: safeName + '.mp4',
-        }, req),
-        filename: safeName + '.mp4',
-        hasAudio: true,
+        var muxedMatch = findFormat(formats, qualityHeight, true);
+        if (muxedMatch && muxedMatch.url) {
+          return res.status(200).json({
+            url: muxedMatch.url,
+            filename: filename,
+            hasAudio: true,
+          });
+        }
+
+        var videoMatch = findFormat(
+          adaptiveFormats.filter(function(f) { return f.mimeType && f.mimeType.indexOf('video/') === 0; }),
+          qualityHeight,
+          true
+        );
+
+        var audioFormats = adaptiveFormats.filter(function(f) {
+          return f.mimeType && f.mimeType.indexOf('audio/') === 0 && isValidStreamUrl(f.url);
+        }).sort(function(a, b) {
+          return (b.bitrate || 0) - (a.bitrate || 0);
+        });
+        var bestAudio = audioFormats[0] || null;
+
+        if (videoMatch && videoMatch.url) {
+          return res.status(200).json({
+            url: videoMatch.url,
+            filename: filename,
+            hasAudio: false,
+            audioUrl: bestAudio ? bestAudio.url : null,
+            qualityLabel: videoMatch.qualityLabel,
+          });
+        }
+
+        var anyMuxed = findFormat(formats, 99999, true);
+        if (anyMuxed && anyMuxed.url) {
+          return res.status(200).json({
+            url: anyMuxed.url,
+            filename: filename,
+            hasAudio: true,
+            fallback: true,
+          });
+        }
+
+        res.status(200).json({
+          url: 'https://cobalt.tools/',
+          filename: filename,
+          hasAudio: true,
+          redirect: true,
+          message: 'Could not get direct download URL. Use cobalt.tools to download this video.',
+        });
+      }).catch(function(ytErr) {
+        console.error('[NEON] YouTube player error:', ytErr.message);
+
+        tryInvidious(videoId, 6000).then(function(result) {
+          if (result && result.data) {
+            var data = result.data;
+            var safeName2 = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
+            var filename2 = safeName2 + '.mp4';
+            var muxed = data.formatStreams || [];
+            var adaptive = (data.adaptiveFormats || []).filter(function(f) { return f.type && f.type.indexOf('video/') === 0; });
+
+            var muxedMatch2 = muxed
+              .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight && isValidStreamUrl(f.url); })
+              .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
+
+            if (muxedMatch2 && muxedMatch2.url) {
+              return res.status(200).json({ url: muxedMatch2.url, filename: filename2, hasAudio: true });
+            }
+
+            var bestVideo2 = adaptive
+              .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight && isValidStreamUrl(f.url); })
+              .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
+
+            if (bestVideo2 && bestVideo2.url) {
+              var audioFormats2 = (data.adaptiveFormats || [])
+                .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0 && isValidStreamUrl(f.url); })
+                .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
+              return res.status(200).json({
+                url: bestVideo2.url,
+                filename: filename2,
+                hasAudio: false,
+                audioUrl: audioFormats2[0] ? audioFormats2[0].url : null,
+                qualityLabel: bestVideo2.qualityLabel,
+              });
+            }
+          }
+
+          res.status(200).json({
+            url: 'https://cobalt.tools/',
+            filename: 'video.mp4',
+            hasAudio: true,
+            redirect: true,
+            message: 'Could not get direct download URL. Use cobalt.tools to download this video.',
+          });
+        });
       });
       return;
     }
