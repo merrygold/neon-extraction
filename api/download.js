@@ -1,12 +1,4 @@
-var INSTANCES = [
-  'https://inv.thepixora.com',
-  'https://invidious.nerdvpn.de',
-  'https://iv.ggtyler.dev',
-  'https://inv.nadeko.net',
-  'https://yt.chocolatemoo53.com',
-  'https://invidious.tiekoetter.com',
-  'https://invidious.f5.si',
-];
+var COBALT_INSTANCE = 'https://co.eepy.today';
 
 function detectPlatform(url) {
   if (/youtube\.com|youtu\.be/i.test(url)) return 'youtube';
@@ -20,27 +12,6 @@ function detectPlatform(url) {
 function extractVideoId(url) {
   var m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
-}
-
-function tryInvidious(videoId, timeout) {
-  var promises = INSTANCES.map(function(instance) {
-    return new Promise(function(resolve) {
-      try {
-        var controller = new AbortController();
-        var timer = setTimeout(function() { controller.abort(); }, timeout);
-        fetch(instance + '/api/v1/videos/' + videoId, {
-          signal: controller.signal,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        })
-          .then(function(r) { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-          .then(function(d) { if (d && d.title) { resolve({ data: d, instance: instance }); } else { resolve(null); } })
-          .catch(function() { clearTimeout(timer); resolve(null); });
-      } catch (e) { resolve(null); }
-    });
-  });
-  return Promise.all(promises).then(function(results) {
-    return results.find(function(r) { return r !== null; }) || null;
-  });
 }
 
 function fetchYouTubePlayer(videoId) {
@@ -103,6 +74,41 @@ function findFormat(formats, qualityHeight, preferMp4) {
   return valid[0] || null;
 }
 
+function fetchCobalt(url) {
+  var body = JSON.stringify({ url: url });
+
+  return fetch(COBALT_INSTANCE + '/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: body,
+  })
+    .then(function(r) { if (!r.ok) throw new Error('Cobalt HTTP ' + r.status); return r.json(); })
+    .then(function(data) {
+      if (data.status === 'error') {
+        throw new Error(data.error && data.error.code ? data.error.code : 'cobalt error');
+      }
+      return data;
+    });
+}
+
+function extractTwitterStatusId(url) {
+  var m = url.match(/(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+function fetchVxtwitter(screenName, statusId) {
+  return fetch('https://api.vxtwitter.com/' + screenName + '/status/' + statusId, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+    },
+  })
+    .then(function(r) { if (!r.ok) throw new Error('vxtwitter HTTP ' + r.status); return r.json(); });
+}
+
 module.exports = function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -134,31 +140,22 @@ module.exports = function handler(req, res) {
 
         var muxedMatch = findFormat(formats, qualityHeight, true);
         if (muxedMatch && muxedMatch.url) {
-          return res.status(200).json({
-            url: muxedMatch.url,
-            filename: filename,
-            hasAudio: true,
-          });
+          return res.status(200).json({ url: muxedMatch.url, filename: filename, hasAudio: true });
         }
 
         var videoMatch = findFormat(
           adaptiveFormats.filter(function(f) { return f.mimeType && f.mimeType.indexOf('video/') === 0; }),
-          qualityHeight,
-          true
+          qualityHeight, true
         );
 
         var audioFormats = adaptiveFormats.filter(function(f) {
           return f.mimeType && f.mimeType.indexOf('audio/') === 0 && isValidStreamUrl(f.url);
-        }).sort(function(a, b) {
-          return (b.bitrate || 0) - (a.bitrate || 0);
-        });
+        }).sort(function(a, b) { return (b.bitrate || 0) - (a.bitrate || 0); });
         var bestAudio = audioFormats[0] || null;
 
         if (videoMatch && videoMatch.url) {
           return res.status(200).json({
-            url: videoMatch.url,
-            filename: filename,
-            hasAudio: false,
+            url: videoMatch.url, filename: filename, hasAudio: false,
             audioUrl: bestAudio ? bestAudio.url : null,
             qualityLabel: videoMatch.qualityLabel,
           });
@@ -166,76 +163,76 @@ module.exports = function handler(req, res) {
 
         var anyMuxed = findFormat(formats, 99999, true);
         if (anyMuxed && anyMuxed.url) {
-          return res.status(200).json({
-            url: anyMuxed.url,
-            filename: filename,
-            hasAudio: true,
-            fallback: true,
-          });
+          return res.status(200).json({ url: anyMuxed.url, filename: filename, hasAudio: true, fallback: true });
         }
 
-        res.status(200).json({
-          url: 'https://cobalt.tools/',
-          filename: filename,
-          hasAudio: true,
-          redirect: true,
-          message: 'Could not get direct download URL. Use cobalt.tools to download this video.',
-        });
-      }).catch(function(ytErr) {
-        console.error('[NEON] YouTube player error:', ytErr.message);
+        res.status(200).json({ url: 'https://cobalt.tools/', filename: filename, hasAudio: true, redirect: true, message: 'Could not get direct download URL. Use cobalt.tools to download.' });
+      }).catch(function(err) {
+        console.error('[NEON] YouTube download error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to get download URL: ' + err.message });
+      });
+      return;
+    }
 
-        tryInvidious(videoId, 6000).then(function(result) {
-          if (result && result.data) {
-            var data = result.data;
-            var safeName2 = (data.title || 'video').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 60);
-            var filename2 = safeName2 + '.mp4';
-            var muxed = data.formatStreams || [];
-            var adaptive = (data.adaptiveFormats || []).filter(function(f) { return f.type && f.type.indexOf('video/') === 0; });
+    if (platform === 'twitter') {
+      var statusId = extractTwitterStatusId(url);
+      var screenName = url.match(/(?:twitter\.com|x\.com)\/(\w+)\/status/);
+      screenName = screenName ? screenName[1] : 'i';
 
-            var muxedMatch2 = muxed
-              .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight && isValidStreamUrl(f.url); })
-              .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-
-            if (muxedMatch2 && muxedMatch2.url) {
-              return res.status(200).json({ url: muxedMatch2.url, filename: filename2, hasAudio: true });
-            }
-
-            var bestVideo2 = adaptive
-              .filter(function(f) { return f.qualityLabel && (parseInt(f.qualityLabel) || 0) <= qualityHeight && isValidStreamUrl(f.url); })
-              .sort(function(a, b) { return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0); })[0];
-
-            if (bestVideo2 && bestVideo2.url) {
-              var audioFormats2 = (data.adaptiveFormats || [])
-                .filter(function(f) { return f.type && f.type.indexOf('audio/') === 0 && isValidStreamUrl(f.url); })
-                .sort(function(a, b) { return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0); });
-              return res.status(200).json({
-                url: bestVideo2.url,
-                filename: filename2,
-                hasAudio: false,
-                audioUrl: audioFormats2[0] ? audioFormats2[0].url : null,
-                qualityLabel: bestVideo2.qualityLabel,
-              });
-            }
+      fetchVxtwitter(screenName, statusId || '').then(function(data) {
+        if (data.media_extended && data.media_extended.length > 0) {
+          var videos = data.media_extended.filter(function(m) { return m.type === 'video' || m.type === 'gif'; });
+          if (videos.length > 0 && videos[0].url) {
+            var safeName = (data.user_name || 'twitter').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').slice(0, 40);
+            return res.status(200).json({ url: videos[0].url, filename: safeName + '.mp4', hasAudio: true });
           }
-
-          res.status(200).json({
-            url: 'https://cobalt.tools/',
-            filename: 'video.mp4',
-            hasAudio: true,
-            redirect: true,
-            message: 'Could not get direct download URL. Use cobalt.tools to download this video.',
-          });
+        }
+        fetchCobalt(url).then(function(cobaltData) {
+          if (cobaltData.url) {
+            var fn = cobaltData.filename || 'twitter_video.mp4';
+            return res.status(200).json({ url: cobaltData.url, filename: fn, hasAudio: true });
+          }
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not extract video. Try cobalt.tools directly.' });
+        }).catch(function() {
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not extract video. Try cobalt.tools directly.' });
+        });
+      }).catch(function() {
+        fetchCobalt(url).then(function(cobaltData) {
+          if (cobaltData.url) {
+            return res.status(200).json({ url: cobaltData.url, filename: cobaltData.filename || 'video.mp4', hasAudio: true });
+          }
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not extract video. Try cobalt.tools directly.' });
+        }).catch(function() {
+          res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not extract video. Try cobalt.tools directly.' });
         });
       });
       return;
     }
 
-    res.status(200).json({
-      url: 'https://cobalt.tools/',
-      filename: 'video.mp4',
-      hasAudio: true,
-      redirect: true,
-      message: platform + ' downloads require cobalt.tools. Paste your URL there to download.',
+    fetchCobalt(url).then(function(cobaltData) {
+      var fn = cobaltData.filename || 'video.mp4';
+      if (cobaltData.status === 'redirect' && cobaltData.url) {
+        res.status(200).json({ url: cobaltData.url, filename: fn, hasAudio: true });
+        return;
+      }
+      if (cobaltData.status === 'tunnel' && cobaltData.url) {
+        res.status(200).json({ url: cobaltData.url, filename: fn, hasAudio: true });
+        return;
+      }
+      if (cobaltData.status === 'picker' && cobaltData.picker && cobaltData.picker.length > 0) {
+        var pick = cobaltData.picker.find(function(p) { return p.type === 'video'; }) || cobaltData.picker[0];
+        if (pick && pick.url) {
+          res.status(200).json({ url: pick.url, filename: fn, hasAudio: true });
+          return;
+        }
+      }
+      if (cobaltData.url) {
+        res.status(200).json({ url: cobaltData.url, filename: fn, hasAudio: true });
+        return;
+      }
+      res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: 'Could not extract video. Try cobalt.tools directly.' });
+    }).catch(function() {
+      res.status(200).json({ url: 'https://cobalt.tools/', filename: 'video.mp4', hasAudio: true, redirect: true, message: platform + ' download failed. Try cobalt.tools directly.' });
     });
   } catch (err) {
     console.error('[NEON] Sync error:', err);
