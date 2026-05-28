@@ -22,37 +22,59 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
+var YT_CLIENTS = [
+  { name: 'ANDROID_VR', clientName: 'ANDROID_VR', clientVersion: '1.30.1', ua: 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6)', sdk: '32', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { name: 'ANDROID_VR_V2', clientName: 'ANDROID_VR', clientVersion: '1.35.1', ua: 'com.google.android.apps.youtube.vr/1.35.1 (Linux; U; Android 14; Quest 3)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { name: 'ANDROID', clientName: 'ANDROID', clientVersion: '19.02.39', ua: 'com.google.android.youtube/19.02.39 (Linux; U; Android 14; Pixel 8 Pro)', sdk: '30', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+  { name: 'ANDROID_MUSIC', clientName: 'ANDROID_MUSIC', clientVersion: '7.11.50', ua: 'com.google.android.apps.youtube.music/7.11.50 (Linux; U; Android 14)', sdk: '34', key: 'AIzaSyA8eiZmM1FaDVzR5qEZ_Bfq2sTg2tGHhXk' },
+];
+
 function fetchYouTubePlayer(videoId) {
-  var body = JSON.stringify({
-    videoId: videoId,
-    context: {
+  var clients = YT_CLIENTS.slice();
+
+  function tryNext() {
+    if (clients.length === 0) return Promise.reject(new Error('All YouTube clients failed'));
+
+    var c = clients.shift();
+    var ctx = {
       client: {
-        clientName: 'ANDROID_VR',
-        clientVersion: '1.30.1',
+        clientName: c.clientName,
+        clientVersion: c.clientVersion,
         hl: 'en',
         gl: 'US',
-        androidSdkVersion: '32',
       },
-    },
-    contentCheckOk: true,
-    racyCheckOk: true,
-  });
+    };
+    if (c.sdk) ctx.client.androidSdkVersion = c.sdk;
 
-  return fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'com.google.android.apps.youtube.vr/1.30.1 (Linux; U; Android 12; Pixel 6 Build/SD1A.210817.015.A4)',
-    },
-    body: body,
-  })
-    .then(function(r) { if (!r.ok) throw new Error('YouTube API HTTP ' + r.status); return r.json(); })
-    .then(function(data) {
-      if (data.playabilityStatus && data.playabilityStatus.status !== 'OK') {
-        throw new Error(data.playabilityStatus.reason || data.playabilityStatus.status);
-      }
-      return data;
+    var body = JSON.stringify({
+      videoId: videoId,
+      context: ctx,
+      contentCheckOk: true,
+      racyCheckOk: true,
     });
+
+    var url = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
+    if (c.key) url += '&key=' + c.key;
+
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': c.ua,
+      },
+      body: body,
+    })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(data) {
+        if (data.playabilityStatus && data.playabilityStatus.status === 'OK' && data.videoDetails) {
+          return data;
+        }
+        return tryNext();
+      })
+      .catch(function() { return tryNext(); });
+  }
+
+  return tryNext();
 }
 
 function parseYouTubeFormats(playerData) {
